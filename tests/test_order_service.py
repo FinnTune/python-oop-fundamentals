@@ -1,69 +1,64 @@
+"""Tests for OrderService, end-to-end order flow, and polymorphism."""
+
+from __future__ import annotations
+
 import unittest
 from typing import List
 
-from payment.processor import PaymentProcessor
-from payment.order_service import OrderService, CartItem
-from payment.stripe_payment import StripePayment
+from payment.domain import Address, CartItem
+from payment.order_service import OrderService, order_service_for_tests
 from payment.paypal_payment import PayPalPayment
+from payment.pricing import NullShippingCalculator, NullTaxCalculator, StandardTaxCalculator, WeightBasedShippingCalculator
+from payment.stripe_payment import StripePayment
 
-
-class FakePaymentProcessor(PaymentProcessor):
-    """
-    A test double — implements the interface but records calls instead of
-    hitting any real API. This is the direct payoff of dependency injection:
-    you can inject a fake and test behaviour without network calls.
-    """
-    def __init__(self, should_succeed: bool = True):
-        self.should_succeed = should_succeed
-        self.charges: List[float] = []
-        self.refunds: List[str] = []
-        self._last_transaction_id = ""
-
-    def charge(self, amount: float, token: str) -> bool:
-        if self.should_succeed:
-            self._last_transaction_id = f"fake_ch_{len(self.charges) + 1}"
-            self.charges.append(amount)
-        return self.should_succeed
-
-    def refund(self, charge_id: str) -> bool:
-        if self.should_succeed:
-            self.refunds.append(charge_id)
-        return self.should_succeed
-
-    def get_last_transaction_id(self) -> str:
-        return self._last_transaction_id
+from tests.fakes import FakePaymentProcessor
 
 
 def make_cart() -> List[CartItem]:
-    """Sample cart — total $79.97 (49.99 + 14.99 * 2)."""
+    """Sample cart — subtotal $79.97 (49.99 + 14.99 * 2)."""
     return [
         CartItem(name="Python Book", price=49.99, quantity=1),
         CartItem(name="USB-C Cable", price=14.99, quantity=2),
     ]
 
 
-class TestCartItem(unittest.TestCase):
-    def test_subtotal_single(self):
-        self.assertAlmostEqual(CartItem("Book", 29.99, 1).subtotal, 29.99, places=2)
-
-    def test_subtotal_multiple(self):
-        self.assertAlmostEqual(CartItem("Cable", 14.99, 3).subtotal, 44.97, places=2)
+class TestOrderServiceFactory(unittest.TestCase):
+    def test_order_service_for_tests_uses_null_pricing_strategies(self):
+        svc = order_service_for_tests(FakePaymentProcessor())
+        self.assertIsInstance(svc._tax, NullTaxCalculator)
+        self.assertIsInstance(svc._shipping, NullShippingCalculator)
 
 
 class TestPlaceOrder(unittest.TestCase):
     def setUp(self):
         self.fake = FakePaymentProcessor()
-        self.service = OrderService(processor=self.fake)
+        self.service = order_service_for_tests(self.fake)
         self.cart = make_cart()
 
     def test_returns_dict_with_expected_keys(self):
         result = self.service.place_order(self.cart, "tok_test")
-        for key in ("total", "transaction_id", "processor", "items"):
+        for key in (
+            "total",
+            "transaction_id",
+            "processor",
+            "line_items",
+            "subtotal",
+            "tax",
+            "shipping",
+            "order_id",
+            "placed_at",
+            "currency",
+            "shipping_address",
+        ):
             self.assertIn(key, result)
 
     def test_correct_total_charged(self):
         self.service.place_order(self.cart, "tok_test")
         self.assertAlmostEqual(self.fake.charges[0], 79.97, places=2)
+
+    def test_passes_payment_token_to_processor(self):
+        self.service.place_order(self.cart, "my_secret_tok")
+        self.assertEqual(self.fake.tokens, ["my_secret_tok"])
 
     def test_order_count_increments(self):
         self.assertEqual(self.service.order_count, 0)
@@ -75,20 +70,82 @@ class TestPlaceOrder(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.service.place_order([], "tok_test")
 
-    def test_failed_payment_raises(self):
-        service = OrderService(processor=FakePaymentProcessor(should_succeed=False))
+    def test_failed_payment_raises_and_does_not_record_order(self):
+        service = order_service_for_tests(FakePaymentProcessor(should_succeed=False))
         with self.assertRaises(RuntimeError):
             service.place_order(self.cart, "tok_test")
+        self.assertEqual(service.order_count, 0)
 
     def test_transaction_id_in_result(self):
         result = self.service.place_order(self.cart, "tok_test")
         self.assertEqual(result["transaction_id"], self.fake.get_last_transaction_id())
 
+    def test_currency_defaults_to_usd_and_is_echoed(self):
+        r = self.service.place_order(self.cart, "tok")
+        self.assertEqual(r["currency"], "USD")
+
+    def test_custom_currency(self):
+        r = self.service.place_order(self.cart, "tok", currency="EUR")
+        self.assertEqual(r["currency"], "EUR")
+
+    def test_shipping_address_none_in_payload(self):
+        r = self.service.place_order(self.cart, "tok")
+        self.assertIsNone(r["shipping_address"])
+
+    def test_shipping_address_round_trips_as_dict(self):
+        addr = Address("10 Oak", "Austin", "TX", "73301", country="US", line2="Ste 2")
+        r = self.service.place_order(self.cart, "tok", shipping_address=addr)
+        self.assertEqual(r["shipping_address"], addr.to_dict())
+
+    def test_line_items_match_cart_lines(self):
+        r = self.service.place_order(self.cart, "tok")
+        self.assertEqual(len(r["line_items"]), len(self.cart))
+        self.assertEqual(r["line_items"][0]["name"], "Python Book")
+
+    def test_tax_and_shipping_applied_when_configured(self):
+        cart = [
+            CartItem("A", 50.0, 1, tax_category="general"),
+            CartItem("B", 10.0, 1, tax_category="exempt"),
+        ]
+        addr = Address("1 Main", "Town", "CA", "90001")
+        svc = OrderService(
+            processor=self.fake,
+            tax_calculator=StandardTaxCalculator(default_rate=0.10, reduced_rate=0.05),
+            shipping_calculator=WeightBasedShippingCalculator(
+                base_fee=5.0, per_kg=2.0, free_subtotal_at=9999.0
+            ),
+        )
+        svc.place_order(cart, "tok_x", shipping_address=addr)
+        self.assertAlmostEqual(self.fake.charges[0], 70.0, places=2)
+
+    def test_default_tax_and_shipping_strategies_integration(self):
+        """OrderService defaults: StandardTaxCalculator + WeightBasedShippingCalculator."""
+        cart = [
+            CartItem("Book", 34.99, 1, tax_category="reduced", weight_kg=0.0),
+            CartItem("Cable", 10.0, 1, tax_category="general", weight_kg=0.0),
+        ]
+        addr = Address("1", "C", "R", "P")
+        svc = OrderService(self.fake)
+        svc.place_order(cart, "tok", shipping_address=addr)
+        # subtotal 44.99; tax 34.99*0.02 + 10*0.0825 = 1.52; ship 5.99 (base only)
+        self.assertAlmostEqual(self.fake.charges[0], 52.50, places=2)
+
+    def test_mutating_returned_order_dict_does_not_corrupt_history(self):
+        result = self.service.place_order(self.cart, "tok_1")
+        result["total"] = -1.0
+        self.assertAlmostEqual(self.service.order_history_snapshot()[0]["total"], 79.97, places=2)
+
+    def test_history_snapshot_is_deep_copy(self):
+        self.service.place_order(self.cart, "tok_1")
+        snap = self.service.order_history_snapshot()
+        snap[0]["total"] = -1.0
+        self.assertNotEqual(self.service.order_history_snapshot()[0]["total"], -1.0)
+
 
 class TestRefund(unittest.TestCase):
     def setUp(self):
         self.fake = FakePaymentProcessor()
-        self.service = OrderService(processor=self.fake)
+        self.service = order_service_for_tests(self.fake)
         self.cart = make_cart()
 
     def test_refund_returns_true(self):
@@ -109,6 +166,22 @@ class TestRefund(unittest.TestCase):
         self.service.refund_last_order()
         self.assertIn(expected, self.fake.refunds)
 
+    def test_refund_failure_leaves_order_in_history(self):
+        bad_refund = FakePaymentProcessor(should_succeed=True, refund_succeeds=False)
+        svc = order_service_for_tests(bad_refund)
+        svc.place_order(self.cart, "tok")
+        self.assertFalse(svc.refund_last_order())
+        self.assertEqual(svc.order_count, 1)
+        self.assertEqual(bad_refund.refunds, [])
+
+    def test_refund_stack_is_lifo(self):
+        self.service.place_order(self.cart, "tok_1")
+        self.service.place_order(self.cart, "tok_2")
+        first_tx = self.service.order_history_snapshot()[0]["transaction_id"]
+        self.service.refund_last_order()
+        self.assertEqual(self.service.order_count, 1)
+        self.assertEqual(self.service.order_history_snapshot()[0]["transaction_id"], first_tx)
+
 
 class TestPolymorphism(unittest.TestCase):
     """Same OrderService code works with any processor — that is polymorphism."""
@@ -117,23 +190,26 @@ class TestPolymorphism(unittest.TestCase):
         self.cart = make_cart()
 
     def test_stripe(self):
-        result = OrderService(StripePayment("sk_test_abc")).place_order(self.cart, "tok_visa")
+        result = order_service_for_tests(StripePayment("sk_test_abc")).place_order(
+            self.cart, "tok_visa"
+        )
         self.assertEqual(result["processor"], "StripePayment")
         self.assertAlmostEqual(result["total"], 79.97, places=2)
 
     def test_paypal(self):
-        result = OrderService(PayPalPayment("pp_id", "pp_sec")).place_order(self.cart, "tok_pp")
+        result = order_service_for_tests(PayPalPayment("pp_id", "pp_sec")).place_order(
+            self.cart, "tok_pp"
+        )
         self.assertEqual(result["processor"], "PayPalPayment")
         self.assertAlmostEqual(result["total"], 79.97, places=2)
 
     def test_fake(self):
-        result = OrderService(FakePaymentProcessor()).place_order(self.cart, "tok_fake")
+        result = order_service_for_tests(FakePaymentProcessor()).place_order(self.cart, "tok_fake")
         self.assertEqual(result["processor"], "FakePaymentProcessor")
 
     def test_two_instances_independent(self):
-        """self keeps each instance's history separate."""
-        a = OrderService(StripePayment("sk_test_aaa"))
-        b = OrderService(StripePayment("sk_test_bbb"))
+        a = order_service_for_tests(StripePayment("sk_test_aaa"))
+        b = order_service_for_tests(StripePayment("sk_test_bbb"))
         a.place_order(self.cart, "tok_1")
         a.place_order(self.cart, "tok_2")
         b.place_order(self.cart, "tok_3")
