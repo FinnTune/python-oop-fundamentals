@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 
 from payment.domain import Address, CartItem
 from payment.pricing import (
@@ -21,19 +22,19 @@ class TestStandardTaxCalculator(unittest.TestCase):
 
     def test_general_category_uses_default_rate(self):
         items = [CartItem("A", 100.0, 1, tax_category="general")]
-        self.assertAlmostEqual(self.calc.tax_for_cart(items, 100.0), 10.0, places=2)
+        self.assertEqual(self.calc.tax_for_cart(items, Decimal("100.00")), Decimal("10.00"))
 
     def test_reduced_category_uses_reduced_rate(self):
         items = [CartItem("Book", 100.0, 1, tax_category="reduced")]
-        self.assertAlmostEqual(self.calc.tax_for_cart(items, 100.0), 5.0, places=2)
+        self.assertEqual(self.calc.tax_for_cart(items, Decimal("100.00")), Decimal("5.00"))
 
     def test_exempt_category_pays_no_tax(self):
         items = [CartItem("Food", 100.0, 1, tax_category="exempt")]
-        self.assertAlmostEqual(self.calc.tax_for_cart(items, 100.0), 0.0, places=2)
+        self.assertEqual(self.calc.tax_for_cart(items, Decimal("100.00")), Decimal("0.00"))
 
     def test_unknown_category_falls_back_to_default_rate(self):
         items = [CartItem("Odd", 50.0, 1, tax_category="luxury-unknown")]
-        self.assertAlmostEqual(self.calc.tax_for_cart(items, 50.0), 5.0, places=2)
+        self.assertEqual(self.calc.tax_for_cart(items, Decimal("50.00")), Decimal("5.00"))
 
     def test_mixed_lines(self):
         items = [
@@ -41,18 +42,18 @@ class TestStandardTaxCalculator(unittest.TestCase):
             CartItem("R", 50.0, 1, tax_category="reduced"),
             CartItem("E", 50.0, 1, tax_category="exempt"),
         ]
-        # 50*0.10 + 50*0.05 + 0 = 7.50
-        self.assertAlmostEqual(self.calc.tax_for_cart(items, 150.0), 7.50, places=2)
+        self.assertEqual(self.calc.tax_for_cart(items, Decimal("150.00")), Decimal("7.50"))
 
     def test_subtotal_argument_is_ignored(self):
         items = [CartItem("A", 10.0, 1)]
-        self.assertAlmostEqual(self.calc.tax_for_cart(items, 9999.0), 1.0, places=2)
+        self.assertEqual(self.calc.tax_for_cart(items, Decimal("9999.00")), Decimal("1.00"))
 
 
 class TestNullTaxCalculator(unittest.TestCase):
     def test_always_zero(self):
         items = [CartItem("A", 100.0, 1, tax_category="general")]
-        self.assertEqual(NullTaxCalculator().tax_for_cart(items, 100.0), 0.0)
+        tax = NullTaxCalculator().tax_for_cart(items, Decimal("100.00"))
+        self.assertEqual(tax, Decimal("0.00"))
 
 
 class TestWeightBasedShippingCalculator(unittest.TestCase):
@@ -62,36 +63,40 @@ class TestWeightBasedShippingCalculator(unittest.TestCase):
     def test_no_address_returns_zero(self):
         calc = WeightBasedShippingCalculator(base_fee=9.0, per_kg=9.0, free_subtotal_at=0.0)
         items = [CartItem("W", 10.0, 1, weight_kg=99.0)]
-        self.assertEqual(calc.shipping_for_cart(items, 10.0, None), 0.0)
+        self.assertEqual(calc.shipping_for_cart(items, Decimal("10.00"), None), Decimal("0.00"))
 
     def test_free_shipping_at_or_above_threshold(self):
         calc = WeightBasedShippingCalculator(base_fee=5.0, per_kg=1.0, free_subtotal_at=100.0)
         items = [CartItem("Big", 100.0, 1, weight_kg=50.0)]
-        self.assertEqual(calc.shipping_for_cart(items, 100.0, self.addr), 0.0)
+        ship = calc.shipping_for_cart(items, Decimal("100.00"), self.addr)
+        self.assertEqual(ship, Decimal("0.00"))
 
     def test_just_below_threshold_charges_shipping(self):
         calc = WeightBasedShippingCalculator(base_fee=4.0, per_kg=2.0, free_subtotal_at=100.0)
         items = [CartItem("Almost", 99.99, 1, weight_kg=1.0)]
-        # 4 + 1*2 = 6
-        self.assertAlmostEqual(calc.shipping_for_cart(items, 99.99, self.addr), 6.0, places=2)
+        ship = calc.shipping_for_cart(items, Decimal("99.99"), self.addr)
+        self.assertEqual(ship, Decimal("6.00"))
 
     def test_weight_scales_with_quantity(self):
         calc = WeightBasedShippingCalculator(base_fee=0.0, per_kg=3.0, free_subtotal_at=9999.0)
         items = [CartItem("Brick", 5.0, 4, weight_kg=0.5)]
-        # total kg = 4 * 0.5 = 2 → 2 * 3 = 6
-        self.assertAlmostEqual(calc.shipping_for_cart(items, 20.0, self.addr), 6.0, places=2)
+        ship = calc.shipping_for_cart(items, Decimal("20.00"), self.addr)
+        self.assertEqual(ship, Decimal("6.00"))
 
     def test_rounds_to_two_decimals(self):
         calc = WeightBasedShippingCalculator(base_fee=1.0, per_kg=0.333, free_subtotal_at=9999.0)
         items = [CartItem("X", 1.0, 1, weight_kg=1.0)]
-        self.assertAlmostEqual(calc.shipping_for_cart(items, 1.0, self.addr), 1.33, places=2)
+        self.assertEqual(calc.shipping_for_cart(items, Decimal("1.00"), self.addr), Decimal("1.33"))
 
 
 class TestNullShippingCalculator(unittest.TestCase):
     def test_always_zero_even_with_address(self):
         addr = Address("1", "C", "R", "P")
         items = [CartItem("A", 10.0, 1)]
-        self.assertEqual(NullShippingCalculator().shipping_for_cart(items, 10.0, addr), 0.0)
+        self.assertEqual(
+            NullShippingCalculator().shipping_for_cart(items, Decimal("10.00"), addr),
+            Decimal("0.00"),
+        )
 
 
 class TestAbstractPricingClasses(unittest.TestCase):

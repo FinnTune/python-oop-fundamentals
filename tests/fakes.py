@@ -1,9 +1,15 @@
-"""Test doubles shared across test modules."""
+"""
+Test doubles shared across test modules.
+
+These fakes record ``Decimal`` charge amounts and optional ``PaymentContext`` values.
+They never perform I/O — keep using them instead of live credentials in tests.
+"""
 
 from __future__ import annotations
 
-from typing import List, Optional
+from decimal import Decimal
 
+from payment.payment_context import PaymentContext
 from payment.processor import PaymentProcessor
 
 
@@ -16,17 +22,24 @@ class FakePaymentProcessor(PaymentProcessor):
         self,
         should_succeed: bool = True,
         *,
-        refund_succeeds: Optional[bool] = None,
+        refund_succeeds: bool | None = None,
     ):
         self.should_succeed = should_succeed
         self._refund_succeeds = should_succeed if refund_succeeds is None else refund_succeeds
-        self.charges: List[float] = []
-        self.refunds: List[str] = []
-        self.tokens: List[str] = []
+        self.charges: list[Decimal] = []
+        self.refunds: list[str] = []
+        self.tokens: list[str] = []
+        self.contexts: list[PaymentContext | None] = []
         self._last_transaction_id = ""
 
-    def charge(self, amount: float, token: str) -> bool:
+    def charge(
+        self,
+        amount: Decimal,
+        token: str,
+        context: PaymentContext | None = None,
+    ) -> bool:
         self.tokens.append(token)
+        self.contexts.append(context)
         if self.should_succeed:
             self._last_transaction_id = f"fake_ch_{len(self.charges) + 1}"
             self.charges.append(amount)

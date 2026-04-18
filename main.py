@@ -1,3 +1,13 @@
+"""
+Interactive walkthrough for the ``payment`` package (OOP concepts).
+
+Uses **fake** processors and demo API keys. Do not point this script at production
+credentials or real cardholder data. See ``payment.security`` and package
+docstrings for security expectations and limitations.
+"""
+
+from decimal import Decimal
+
 from payment import (
     Address,
     CartItem,
@@ -45,14 +55,14 @@ print(f"PayPalPayment is a PaymentProcessor? {isinstance(paypal, PaymentProcesso
 separator("CONCEPT 3 — Polymorphism")
 
 
-def process_payment(processor: PaymentProcessor, amount: float, token: str):
+def process_payment(processor: PaymentProcessor, amount: Decimal, token: str):
     """Knows nothing about Stripe or PayPal — just calls .charge()."""
-    success = processor.charge(amount=amount, token=token)
+    success = processor.charge(amount=amount, token=token, context=None)
     print(f"Outcome: {'success' if success else 'failed'}")
 
 
-process_payment(stripe, 29.99, "tok_visa_4242")
-process_payment(paypal, 29.99, "tok_paypal_abc")
+process_payment(stripe, Decimal("29.99"), "tok_visa_4242")
+process_payment(paypal, Decimal("29.99"), "tok_paypal_abc")
 
 
 # ── CONCEPT 4 — Dependency Injection ─────────────────
@@ -93,7 +103,6 @@ office_addr = Address(
     country="US",
 )
 
-# Realistic defaults: mixed tax categories + weight-based shipping (free over $100 subtotal).
 stripe_service = OrderService(processor=stripe)
 order = stripe_service.place_order(
     cart,
@@ -101,12 +110,12 @@ order = stripe_service.place_order(
     shipping_address=office_addr,
 )
 print(
-    f"Placed via: {order['processor']}, "
-    f"order {order['order_id']}, "
-    f"subtotal ${order['subtotal']:.2f}, "
-    f"tax ${order['tax']:.2f}, "
-    f"ship ${order['shipping']:.2f}, "
-    f"charged ${order['total']:.2f}",
+    f"Placed via: {order.processor}, "
+    f"order {order.order_id}, "
+    f"subtotal ${order.subtotal:.2f}, "
+    f"tax ${order.tax:.2f}, "
+    f"ship ${order.shipping:.2f}, "
+    f"charged ${order.total:.2f}",
 )
 
 paypal_service = OrderService(
@@ -121,7 +130,7 @@ order = paypal_service.place_order(
 )
 print(
     "Same cart with null tax/shipping strategies "
-    f"(still passes address): charged ${order['total']:.2f}",
+    f"(still passes address): charged ${order.total:.2f}",
 )
 
 small_cart = [
@@ -165,8 +174,12 @@ separator("EXTRA — Order snapshot (line items + audit fields)")
 snap = service_a.order_history_snapshot()
 if snap:
     last = snap[-1]
-    print(f"Last order: {last['order_id']} at {last['placed_at']}")
-    for line in last["line_items"]:
-        print(f"  {line['sku'] or '—':12}  {line['name'][:28]:28}  x{line['quantity']}  ${line['subtotal']:.2f}")
+    print(f"Last order: {last.order_id} at {last.placed_at}")
+    for line in last.line_items:
+        sku = line["sku"] or "—"
+        title = line["name"][:28]
+        qty = line["quantity"]
+        sub = line["subtotal"]
+        print(f"  {sku:12}  {title:28}  x{qty}  ${sub:.2f}")
 
 separator("Done — run: python -m pytest tests/ -v")

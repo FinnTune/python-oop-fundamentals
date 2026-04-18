@@ -6,6 +6,7 @@ import re
 import unittest
 from dataclasses import FrozenInstanceError
 from datetime import datetime
+from decimal import Decimal
 
 from payment.domain import Address, CartItem, cart_subtotal, generate_order_id, utc_now_iso
 
@@ -40,13 +41,17 @@ class TestAddress(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             addr.city = "Other"  # type: ignore[misc]
 
+    def test_address_field_length_limit(self):
+        with self.assertRaises(ValueError):
+            Address("x" * 300, "C", "R", "P")
+
 
 class TestCartItem(unittest.TestCase):
     def test_subtotal_single(self):
-        self.assertAlmostEqual(CartItem("Book", 29.99, 1).subtotal, 29.99, places=2)
+        self.assertEqual(CartItem("Book", 29.99, 1).subtotal, Decimal("29.99"))
 
     def test_subtotal_multiple(self):
-        self.assertAlmostEqual(CartItem("Cable", 14.99, 3).subtotal, 44.97, places=2)
+        self.assertEqual(CartItem("Cable", 14.99, 3).subtotal, Decimal("44.97"))
 
     def test_line_dict_includes_sku_and_tax_category(self):
         line = CartItem("Mug", 12.0, 2, sku="MUG-01", tax_category="reduced")
@@ -63,9 +68,17 @@ class TestCartItem(unittest.TestCase):
         with self.assertRaises(ValueError):
             CartItem("X", -1.0, 1)
 
+    def test_invalid_weight_raises(self):
+        with self.assertRaises(ValueError):
+            CartItem("X", 1.0, 1, weight_kg=-0.1)
+        with self.assertRaises(ValueError):
+            CartItem("X", 1.0, 1, weight_kg=float("nan"))
+        with self.assertRaises(ValueError):
+            CartItem("X", 1.0, 1, weight_kg=float("inf"))
+
     def test_zero_unit_price_allowed(self):
         item = CartItem("Free sample", 0.0, 1)
-        self.assertAlmostEqual(item.subtotal, 0.0, places=2)
+        self.assertEqual(item.subtotal, Decimal("0.00"))
 
     def test_to_line_dict_includes_weight(self):
         d = CartItem("Heavy", 10.0, 2, sku="H-1", weight_kg=3.5).to_line_dict()
@@ -73,21 +86,24 @@ class TestCartItem(unittest.TestCase):
         self.assertAlmostEqual(d["unit_price"], 10.0, places=2)
         self.assertEqual(d["quantity"], 2)
 
-    def test_subtotal_rounds_to_two_decimals(self):
-        # 3 * 10.005 = 30.015 → 30.02 when rounded per line
-        self.assertAlmostEqual(CartItem("X", 10.005, 3).subtotal, 30.02, places=2)
+    def test_unit_price_quantized_before_line_subtotal(self):
+        # Unit price is stored quantized to cents; 10.005 USD/ea becomes 10.00.
+        self.assertEqual(CartItem("X", Decimal("10.005"), 3).subtotal, Decimal("30.00"))
+
+    def test_line_subtotal_quantized(self):
+        self.assertEqual(CartItem("X", Decimal("10.017"), 1).subtotal, Decimal("10.02"))
 
 
 class TestCartSubtotal(unittest.TestCase):
     def test_empty_cart(self):
-        self.assertEqual(cart_subtotal([]), 0.0)
+        self.assertEqual(cart_subtotal([]), Decimal("0.00"))
 
     def test_sums_line_subtotals_and_rounds(self):
         items = [
             CartItem("A", 10.0, 1),
             CartItem("B", 20.0, 2),
         ]
-        self.assertAlmostEqual(cart_subtotal(items), 50.0, places=2)
+        self.assertEqual(cart_subtotal(items), Decimal("50.00"))
 
 
 class TestOrderIdAndTimestamp(unittest.TestCase):

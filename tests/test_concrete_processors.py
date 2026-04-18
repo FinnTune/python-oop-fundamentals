@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 
+from payment.payment_context import PaymentContext
 from payment.paypal_payment import PayPalPayment
 from payment.stripe_payment import StripePayment
 
@@ -12,13 +14,21 @@ class TestStripePayment(unittest.TestCase):
     def setUp(self):
         self.p = StripePayment("sk_test_123456789")
 
+    def test_empty_api_key_rejected(self):
+        with self.assertRaises(ValueError):
+            StripePayment("")
+
     def test_charge_updates_last_transaction_id(self):
         self.assertEqual(self.p.get_last_transaction_id(), "")
-        self.assertTrue(self.p.charge(12.34, "tok_visa_4242"))
+        self.assertTrue(self.p.charge(Decimal("12.34"), "tok_visa_4242"))
         self.assertTrue(self.p.get_last_transaction_id().startswith("ch_stripe_"))
 
+    def test_charge_accepts_payment_context(self):
+        ctx = PaymentContext(order_id="ORD-TEST", idempotency_key="ik-1")
+        self.assertTrue(self.p.charge(Decimal("1.00"), "tok_a", ctx))
+
     def test_refund_returns_true(self):
-        self.assertTrue(self.p.charge(1.0, "tok_a"))
+        self.assertTrue(self.p.charge(Decimal("1.00"), "tok_a"))
         self.assertTrue(self.p.refund(self.p.get_last_transaction_id()))
 
 
@@ -26,14 +36,20 @@ class TestPayPalPayment(unittest.TestCase):
     def setUp(self):
         self.p = PayPalPayment("client_id_xx", "secret_yy")
 
+    def test_empty_credentials_rejected(self):
+        with self.assertRaises(ValueError):
+            PayPalPayment("", "sec")
+        with self.assertRaises(ValueError):
+            PayPalPayment("id", "")
+
     def test_charge_updates_last_transaction_id(self):
         self.assertEqual(self.p.get_last_transaction_id(), "")
-        self.assertTrue(self.p.charge(9.99, "tok_paypal_abc"))
+        self.assertTrue(self.p.charge(Decimal("9.99"), "tok_paypal_abc"))
         tid = self.p.get_last_transaction_id()
         self.assertTrue(tid.startswith("PAYID-"))
 
     def test_refund_returns_true(self):
-        self.assertTrue(self.p.charge(2.0, "tok_b"))
+        self.assertTrue(self.p.charge(Decimal("2.00"), "tok_b"))
         self.assertTrue(self.p.refund(self.p.get_last_transaction_id()))
 
 
