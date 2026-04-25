@@ -51,3 +51,10 @@ docs/02_interfaces.md           →  payment/processor.py
 docs/03_polymorphism.md         →  payment/order_service.py
 docs/04_dependency_injection.md →  tests/test_order_service.py
 main.py                         →  see it all working together
+
+## License
+
+Copyright (C) 2026 Andre Teetor
+
+This project is licensed under the GNU General Public License v2.0 —
+see the [LICENSE](LICENSE) file for details.
