@@ -5,11 +5,19 @@ from __future__ import annotations
 import unittest
 from decimal import Decimal
 
+from payment.discounts import PromoCodeDiscountCalculator
 from payment.domain import Address, CartItem, cart_subtotal
+from payment.exceptions import InsufficientStockError, PaymentFailedError
+from payment.inventory import InMemoryInventory
 from payment.order_service import OrderService, order_service_for_tests
 from payment.paypal_payment import PayPalPayment
-from payment.placed_order import PlacedOrder
-from payment.pricing import StandardTaxCalculator, WeightBasedShippingCalculator
+from payment.placed_order import OrderStatus, PlacedOrder
+from payment.pricing import (
+    NullShippingCalculator,
+    NullTaxCalculator,
+    StandardTaxCalculator,
+    WeightBasedShippingCalculator,
+)
 from payment.stripe_payment import StripePayment
 
 from tests.fakes import FakePaymentProcessor
@@ -48,12 +56,15 @@ class TestPlaceOrder(unittest.TestCase):
             "processor",
             "line_items",
             "subtotal",
+            "discount",
             "tax",
             "shipping",
             "order_id",
             "placed_at",
             "currency",
             "shipping_address",
+            "status",
+            "customer_id",
         ):
             self.assertIn(key, d)
 
@@ -111,9 +122,37 @@ class TestPlaceOrder(unittest.TestCase):
 
     def test_failed_payment_raises_and_does_not_record_order(self):
         service = order_service_for_tests(FakePaymentProcessor(should_succeed=False))
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(PaymentFailedError):
             service.place_order(self.cart, "tok_test")
         self.assertEqual(service.order_count, 0)
+
+    def test_promo_discount_reduces_charge(self):
+        svc = OrderService(
+            processor=self.fake,
+            tax_calculator=NullTaxCalculator(),
+            shipping_calculator=NullShippingCalculator(),
+            discount_calculator=PromoCodeDiscountCalculator({"SAVE10": "0.10"}),
+            reporter=lambda _m: None,
+        )
+        svc.place_order(self.cart, "tok", promo_code="SAVE10")
+        self.assertEqual(self.fake.charges[0], Decimal("71.97"))
+
+    def test_insufficient_stock_raises_before_charge(self):
+        inv = InMemoryInventory({"PYTHON-BOOK": 0})
+        cart = [CartItem("Python Book", 49.99, 1, sku="PYTHON-BOOK")]
+        svc = OrderService(processor=self.fake, inventory=inv, reporter=lambda _m: None)
+        with self.assertRaises(InsufficientStockError):
+            svc.place_order(cart, "tok")
+        self.assertEqual(self.fake.charges, [])
+
+    def test_get_order_and_customer_history(self):
+        self.service.place_order(self.cart, "tok", customer_id="cust-42")
+        o = self.service.get_order(self.service.order_history_snapshot()[0].order_id)
+        self.assertIsNotNone(o)
+        assert o is not None
+        self.assertEqual(o.customer_id, "cust-42")
+        hist = self.service.orders_for_customer("cust-42")
+        self.assertEqual(len(hist), 1)
 
     def test_transaction_id_in_result(self):
         result = self.service.place_order(self.cart, "tok_test")
@@ -190,10 +229,13 @@ class TestRefund(unittest.TestCase):
         self.service.place_order(self.cart, "tok_test")
         self.assertTrue(self.service.refund_last_order())
 
-    def test_refund_decrements_count(self):
+    def test_refund_marks_refunded_and_keeps_history(self):
         self.service.place_order(self.cart, "tok_test")
-        self.service.refund_last_order()
-        self.assertEqual(self.service.order_count, 0)
+        self.assertTrue(self.service.refund_last_order())
+        self.assertEqual(self.service.order_count, 1)
+        self.assertEqual(self.service.paid_order_count, 0)
+        snap = self.service.order_history_snapshot()[0]
+        self.assertEqual(snap.status, OrderStatus.REFUNDED)
 
     def test_refund_with_no_orders(self):
         self.assertFalse(self.service.refund_last_order())
@@ -217,16 +259,21 @@ class TestRefund(unittest.TestCase):
         self.service.place_order(self.cart, "tok_2")
         first_tx = self.service.order_history_snapshot()[0].transaction_id
         self.service.refund_last_order()
-        self.assertEqual(self.service.order_count, 1)
+        self.assertEqual(self.service.order_count, 2)
+        self.assertEqual(self.service.paid_order_count, 1)
         self.assertEqual(self.service.order_history_snapshot()[0].transaction_id, first_tx)
+        self.assertEqual(self.service.order_history_snapshot()[1].status, OrderStatus.REFUNDED)
 
-    def test_refund_order_by_id_removes_that_order(self):
+    def test_refund_order_by_id_marks_that_order(self):
         a = self.service.place_order(self.cart, "tok_a")
         b = self.service.place_order(self.cart, "tok_b")
         self.assertTrue(self.service.refund_order(a.order_id))
-        self.assertEqual(self.service.order_count, 1)
-        remaining = self.service.order_history_snapshot()[0]
-        self.assertEqual(remaining.order_id, b.order_id)
+        self.assertEqual(self.service.order_count, 2)
+        self.assertEqual(self.service.paid_order_count, 1)
+        self.assertEqual(self.service.get_order(a.order_id).status, OrderStatus.REFUNDED)
+        remaining = self.service.get_order(b.order_id)
+        assert remaining is not None
+        self.assertEqual(remaining.status, OrderStatus.PAID)
 
     def test_refund_order_unknown_id_returns_false(self):
         self.service.place_order(self.cart, "tok")

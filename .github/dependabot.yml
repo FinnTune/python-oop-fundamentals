@@ -1,0 +1,28 @@
+# Dependabot opens PRs to keep dependencies and GitHub Actions up to date.
+# https://docs.github.com/en/code-security/dependabot
+
+version: 2
+
+updates:
+  # requirements.txt and pyproject.toml [project.optional-dependencies]
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    groups:
+      dev-dependencies:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # actions/checkout, actions/setup-python, etc.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5

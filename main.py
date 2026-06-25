@@ -10,13 +10,16 @@ from decimal import Decimal
 
 from payment import (
     Address,
-    CartItem,
+    InMemoryInventory,
     NullShippingCalculator,
     NullTaxCalculator,
     OrderService,
     PayPalPayment,
+    PromoCodeDiscountCalculator,
     StripePayment,
+    build_cart_from_catalog,
 )
+from payment.domain import CartItem
 from payment.order_service import order_service_for_tests
 from payment.processor import PaymentProcessor
 
@@ -166,6 +169,51 @@ service_b.place_order(small, "tok_3")
 
 print(f"service_a order count: {service_a.order_count}")   # 2
 print(f"service_b order count: {service_b.order_count}")   # 1
+
+
+# ── CONCEPT 6 — More strategies: catalog, inventory, promo codes ──
+separator("CONCEPT 6 — Catalog + inventory + promo discount")
+
+catalog_cart = build_cart_from_catalog(
+    [
+        ("BOOK-CC-001", 1),
+        ("NB-A5-LIN", 2),
+    ]
+)
+stock = InMemoryInventory(
+    {
+        "BOOK-CC-001": 3,
+        "NB-A5-LIN": 5,
+    }
+)
+promo_service = OrderService(
+    processor=StripePayment("sk_live_promo"),
+    inventory=stock,
+    discount_calculator=PromoCodeDiscountCalculator({"SAVE10": "0.10"}),
+)
+placed = promo_service.place_order(
+    catalog_cart,
+    "tok_visa_promo",
+    shipping_address=office_addr,
+    promo_code="SAVE10",
+    customer_id="demo-customer-1",
+)
+print(
+    f"Catalog order {placed.order_id}: discount ${placed.discount:.2f}, "
+    f"charged ${placed.total:.2f}, stock BOOK left {stock.available('BOOK-CC-001')}"
+)
+lookup = promo_service.get_order(placed.order_id)
+if lookup:
+    print(f"Lookup by id: {lookup.order_id} status={lookup.status.value}")
+else:
+    print("Lookup by id: —")
+promo_service.refund_order(placed.order_id)
+refunded = promo_service.get_order(placed.order_id)
+assert refunded is not None
+print(
+    f"After refund: status={refunded.status.value}, "
+    f"stock BOOK restored to {stock.available('BOOK-CC-001')}"
+)
 
 
 # ── EXTRA — Richer data in history ────────────────────
